@@ -1,0 +1,261 @@
+---
+title: "Genetic diversity analysis of angled luffa germplasm resources based on phenotypic traits and resequencing data"
+author: "Dennis Rodríguez"
+format:
+  html:
+    toc: true
+    toc-location: left
+    toc-expand: 4
+    number-sections: true
+    self-contained: true
+    output-file: "index"
+editor_options:
+  chunk_output_type: console
+execute:
+  warning: false
+  echo: false
+---
+
+# Referencias
+
+- https://doi.org/10.3389/fpls.2026.1774008
+
+Este ejercicio utiliza los rasgos fenotípicos de 209 accesiones. El PCA fenotípico no es el PCA de SNP genómicos del mismo artículo.
+
+# Librerías y configuración
+
+Instalar paquetes: `install.packages(c("googlesheets4", "dplyr", "FactoMineR", "factoextra", "cowplot", "knitr"))`.
+
+```{r}
+#| label: setup
+
+source("https://inkaverse.com/setup.r")
+library(googlesheets4)
+library(dplyr)
+library(FactoMineR)
+library(factoextra)
+library(cowplot)
+library(knitr)
+
+# Lectura sin autenticación interactiva de la hoja compartida.
+googlesheets4::gs4_deauth()
+```
+
+# Importación de datos
+
+La primera fila de cada hoja contiene el título de la tabla. `skip = 1` permite leer la segunda fila como encabezados.
+
+```{r}
+#| label: importacion
+
+url <- "https://docs.google.com/spreadsheets/d/11DY5H7xiwnG5BYIPd5Cqb--IGADGK1IMpCK_NW-urm4/edit"
+gs <- googlesheets4::as_sheets_id(url)
+
+recursos <- googlesheets4::range_read(
+  ss = gs, sheet = "Supplementary Table 1", skip = 1
+)
+
+feno <- googlesheets4::range_read(
+  ss = gs, sheet = "Supplementary Table 2", skip = 1
+)
+
+grupos <- googlesheets4::range_read(
+  ss = gs, sheet = "Supplementary Table 9", skip = 1
+)
+
+str(recursos)
+str(feno)
+str(grupos)
+```
+
+# Unir base de datos
+
+Se iguala el nombre del identificador en las tres hojas. De la tabla 9 se toma únicamente el grupo genético; los rasgos fenotípicos proceden de la tabla 2.
+
+```{r}
+#| label: union
+
+recursos <- recursos |>
+  dplyr::rename(Genotype = `Resource ID`)
+
+feno <- feno |>
+  dplyr::rename(Genotype = Number)
+
+grupos <- grupos |>
+  dplyr::select(
+    Genotype = Number,
+    Grupo_genetico = `Classification of genetic populations`
+  )
+
+if (any(vapply(
+  list(recursos, feno, grupos),
+  function(x) anyDuplicated(x$Genotype) > 0,
+  logical(1)
+))) {
+  stop("Hay identificadores Genotype repetidos en alguna de las tres hojas.")
+}
+
+if (!setequal(recursos$Genotype, feno$Genotype) ||
+    !setequal(grupos$Genotype, feno$Genotype)) {
+  stop("Los identificadores Genotype no coinciden entre las tres hojas.")
+}
+
+fb <- merge(feno, recursos, by = "Genotype") |>
+  merge(grupos, by = "Genotype") |>
+  dplyr::select(Genotype, Region, Grupo_genetico, dplyr::everything()) |>
+  dplyr::mutate(
+    dplyr::across(
+      -c(Genotype, Region, Grupo_genetico),
+      as.numeric
+    )
+  )
+
+if (nrow(fb) != 209L || ncol(fb) != 31L || anyNA(fb)) {
+  stop(
+    "La matriz debe tener 209 filas, 31 columnas y ningún valor faltante. ",
+    "Revise la importación y conversión numérica."
+  )
+}
+
+if (!all(vapply(fb[-(1:3)], is.numeric, logical(1)))) {
+  stop("Las 28 columnas de rasgos deben ser numéricas.")
+}
+
+str(fb)
+knitr::kable(
+  head(fb[, 1:8]),
+  caption = "Primeras accesiones de la matriz unida"
+)
+```
+
+# Análisis de componentes principales - PCA
+
+`Genotype` identifica las accesiones y pasa a los nombres de fila. `Region` y `Grupo_genetico` son variables cualitativas suplementarias: permiten describir o colorear el resultado, pero no construyen los componentes. Los 28 rasgos son variables activas y se estandarizan porque tienen unidades y escalas diferentes.
+
+```{r}
+#| label: pca
+
+datos_pca <- as.data.frame(fb)
+rownames(datos_pca) <- datos_pca$Genotype
+datos_pca$Genotype <- NULL
+
+datos_pca$Region <- as.factor(datos_pca$Region)
+datos_pca$Grupo_genetico <- as.factor(datos_pca$Grupo_genetico)
+
+mv <- FactoMineR::PCA(
+  X = datos_pca,
+  scale.unit = TRUE,
+  quali.sup = 1:2,
+  ncp = 9,
+  graph = FALSE
+)
+
+knitr::kable(
+  data.frame(
+    Componente = rownames(mv$eig)[1:9],
+    Autovalor = round(mv$eig[1:9, 1], 3),
+    Varianza_porcentaje = round(mv$eig[1:9, 2], 2),
+    Acumulado_porcentaje = round(mv$eig[1:9, 3], 2)
+  ),
+  caption = "Autovalores y varianza explicada"
+)
+
+var <- FactoMineR::plot.PCA(
+  mv, choix = "var", cex = 0.7
+)
+
+ind <- FactoMineR::plot.PCA(
+  mv,
+  choix = "ind",
+  cex = 0.7,
+  label = "none",
+  invisible = "quali",
+  habillage = 2
+)
+
+cowplot::plot_grid(
+  plotlist = list(var, ind),
+  ncol = 2,
+  labels = "auto"
+)
+
+summary(mv, nbelements = Inf, nb.dec = 2)
+
+pcainfo <- factoextra::get_pca_var(mv)
+pcainfo$cor
+pcainfo$contrib
+```
+
+La fuente codifica numéricamente ocho rasgos cualitativos. Este PCA los trata como números, tal como se plantea para los 28 rasgos del artículo; al interpretar los ejes debe considerarse que los intervalos entre códigos no necesariamente representan distancias biológicas equivalentes.
+
+# Análisis de clústeres
+
+El HCPC agrupa accesiones a partir de los componentes conservados en `mv`. El número de clústeres se selecciona automáticamente y puede diferir de los seis grupos genéticos publicados.
+
+```{r}
+#| label: hcpc
+
+set.seed(2026)
+
+cls <- FactoMineR::HCPC(
+  mv,
+  nb.clust = -1,
+  graph = FALSE
+)
+
+cat(
+  "Número de clústeres HCPC:",
+  length(unique(cls$data.clust$clust)),
+  "\n"
+)
+print(table(cls$data.clust$clust))
+
+FactoMineR::plot.HCPC(
+  cls,
+  choice = "map",
+  draw.tree = FALSE,
+  ind.names = FALSE
+)
+
+FactoMineR::plot.HCPC(
+  cls,
+  choice = "tree"
+)
+
+map <- function() {
+  FactoMineR::plot.HCPC(
+    cls,
+    choice = "map",
+    draw.tree = FALSE,
+    ind.names = FALSE
+  )
+}
+
+cowplot::plot_grid(
+  plotlist = list(var, map),
+  ncol = 2,
+  labels = "auto"
+)
+```
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+1 + 1
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
